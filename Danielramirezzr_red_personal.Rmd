@@ -82,7 +82,7 @@ El primer paso consiste en escoger un usuario focal (o "ego") a partir del cual 
 ego <- "Danielramirezzr" # Daniel Ramírez
 ego_info <- lookup_users(ego, token = sample(token, 1))
 
-ego_info$followers_count
+ego_info
 ```
 
 Nombre: `r ego_info$name`
@@ -613,37 +613,35 @@ ego_network_subset %>%
 ### Red Personal
 
 ```{r}
-edge_list1 <- list.files(paste0(ego, "_friends_of_friends/"), full.names = TRUE) %>% 
+edge_list <- list.files(paste0(ego, "_friends_of_friends/"), full.names = TRUE) %>% 
   map(read_rds)
 
-error_index <- edge_list1 %>% 
+error_index <- edge_list %>% 
   map_lgl(~ any(class(.x) == "try-error")) %>% 
   which()
 
-edge_list1 <- edge_list1[-error_index] %>% bind_rows()
+edge_list <- edge_list[-error_index] %>% bind_rows()
 
-edge_list2 <- list.files(paste0(ego, "_friends_of_followers/"), full.names = TRUE) %>% 
-  map(read_rds)
-
-error_index <- edge_list2 %>% 
-  map_lgl(~ any(class(.x) == "try-error")) %>% 
-  which()
-
-edge_list2 <- edge_list2[-error_index] %>% bind_rows()
-
-mutual_network <- inner_join(
-  edge_list1,
-  edge_list2
-) %>% 
+edge_list_mutual <- inner_join(
+  edge_list, 
+  edge_list %>% rename(from = to, to = from)
+  ) %>% 
   filter(from %in% ego_followers$user_id, to %in% ego_followers$user_id) %>% 
   filter(from %in% ego_friends$user_id, to %in% ego_friends$user_id) %>% 
   filter(from %in% to, to %in% from)
 
-mutual_network <- mutual_network %>% 
+mat <- edge_list_mutual %>% 
   mutate(n = 1) %>% 
   tidytext::cast_sparse(from, to, n) %>% 
+  as.matrix()
+
+mat <- mat[colnames(mat), ]
+
+mutual_network <- mat %>% 
   graph_from_adjacency_matrix(mode = "undirected") %>% 
   tidygraph::as_tbl_graph() 
+
+mutual_network
 
 ```
 
@@ -669,22 +667,19 @@ mutual_network <- mutual_network %>%
 
 mutual_network <- mutual_network %>% 
   mutate(
-    out_degree = centrality_degree(mode = "out"),
-    in_degree = centrality_degree(mode = "in"),
+    degree = centrality_degree(),
     betweenness = centrality_betweenness(directed = TRUE),
     authority_score = centrality_authority(),
     eigen_centrality = centrality_eigen(directed = TRUE)
   )
 ```
 
-
 La siguiente gráfica muestra la influencia de cada usuario en Twitter (eje horizontal) vs la influencia de cada usuario dentro de la red personal de amigos (eje vertical)
 
 ```{r}
 mutual_network %>% 
   as_tibble() %>% 
-  #filter(in_degree > 5) %>% 
-  ggplot(aes(followers_count, in_degree)) + 
+  ggplot(aes(followers_count, degree)) + 
   geom_point() 
 ```
 
@@ -692,11 +687,11 @@ mutual_network %>%
 mutual_network %>% 
   as_tibble() %>% 
   mutate(label_name = ifelse(
-    test = rank(-followers_count) <= 10 | rank(-in_degree) <= 10, 
+    test = rank(-followers_count) <= 15 | rank(-degree) <= 15, 
     yes = name, 
     no = NA_character_)
     ) %>% 
-  ggplot(aes(followers_count, in_degree)) + 
+  ggplot(aes(followers_count, degree)) + 
   geom_point() + 
   ggrepel::geom_label_repel(aes(label = label_name), size = 3)
 ```
@@ -704,7 +699,7 @@ mutual_network %>%
 __Clusters__
 
 ```{r}
-clusters <- igraph::cluster_walktrap(graph = ego_network, steps = 7)
+clusters <- igraph::cluster_louvain(graph = mutual_network)
 
 cluster_df <- tibble(cluster = factor(clusters$membership), name = clusters$names) 
   
@@ -720,11 +715,11 @@ mutual_network <- mutual_network %>%
 
 mutual_network %>% 
   as_tibble() %>% 
-  arrange(desc(in_degree)) %>% 
+  arrange(desc(degree)) %>%
   filter(!is.na(cluster)) %>% 
   group_by(cluster) %>%
   filter(rank(-authority_score) <= 50) %>% 
-  ggplot(aes(label = name, size = log(in_degree), color = in_degree)) + 
+  ggplot(aes(label = name, size = log(degree), color = degree)) + 
   geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
   facet_wrap(~cluster) + 
   labs(title = "Seguidores prominentes en cada cluster") + 
@@ -746,7 +741,7 @@ mutual_network %>%
 ```
 
 ```{r}
-cols <- c("betweenness", "in_degree", "out_degree", "followers_count", "friends_count")
+cols <- c("betweenness", "degree", "followers_count", "friends_count")
 
 mutual_network %>% 
   as_tibble() %>% 
@@ -761,8 +756,7 @@ mutual_network %>%
 mutual_network_subset <- mutual_network %>% 
   filter(!is.na(cluster)) %>% 
     mutate(
-    out_degree = centrality_degree(mode = "out"),
-    in_degree = centrality_degree(mode = "in"),
+    degree = centrality_degree(),
     betweenness = centrality_betweenness(directed = TRUE),
     authority_score = centrality_authority(),
     eigen_centrality = centrality_eigen(directed = TRUE)
@@ -771,7 +765,7 @@ mutual_network_subset <- mutual_network %>%
 mutual_network_subset %>% 
   ggraph("mds") +
   geom_edge_fan(alpha = 1/5, width = 1/5) + 
-  geom_node_point(aes(fill = cluster, size = in_degree), 
+  geom_node_point(aes(fill = cluster, size = degree), 
                   shape = 21, color = "white", show.legend = FALSE) 
 ```
 
@@ -779,31 +773,31 @@ mutual_network_subset %>%
 mutual_network_subset %>% 
   as_tibble() %>% 
   mutate(label_id = ifelse(
-    test = rank(-betweenness) <= 10 |rank(-in_degree) <= 10, 
+    test = rank(-betweenness) <= 10 |rank(-degree) <= 10, 
     yes = name, 
     no = NA_character_)
     ) %>% 
-  ggplot(aes(betweenness, in_degree, color = cluster)) +
+  ggplot(aes(betweenness, degree, color = cluster)) +
   geom_point() +
   ggrepel::geom_label_repel(aes(label = label_id), size = 3)
 
 ```
 
-```{r}
+```{r, fig.height=5}
 mutual_network_subset %>% 
+  group_by(cluster) %>% 
+  mutate(label_name = ifelse(
+    test = rank(-degree) <= 5 | rank(-betweenness) <= 5,
+    yes = name,
+    no = NA_character_
+  )) %>% 
   ggraph("mds") +
   geom_edge_fan(alpha = 1/5, width = 1/5) + 
-  geom_node_point(aes(fill = cluster, size = authority_score), 
+  geom_node_point(aes(fill = cluster, size = betweenness), 
                   shape = 21, color = "white", show.legend = FALSE) +
-  geom_node_label(aes(filter = rank(-authority_score) <= 10 | rank(-betweenness) <= 10, 
-                      label = name), 
+  geom_node_label(aes(label = label_name), 
                   repel = TRUE, alpha = 3/4, size = 3) 
 ```
-
-```{r}
-mutual_network_subset %>% as_tibble() %>% View
-```
-
 
 
 ## Funciones adicionales
