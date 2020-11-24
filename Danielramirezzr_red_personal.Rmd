@@ -530,11 +530,11 @@ ego_network %>%
   arrange(desc(in_degree)) %>% 
   filter(!is.na(cluster)) %>% 
   group_by(cluster) %>%
-  filter(rank(-authority_score) <= 50) %>% 
+  filter(rank(-authority_score) <= 30) %>% 
   ggplot(aes(label = name, size = log(in_degree), color = in_degree)) + 
   geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
   facet_wrap(~cluster) + 
-  labs(title = "Seguidores prominentes en cada cluster") + 
+  labs(title = "Amigos prominentes en cada cluster") + 
   scale_color_gradient(low = "grey", high = "purple") 
 ```
 
@@ -718,11 +718,11 @@ mutual_network %>%
   arrange(desc(degree)) %>%
   filter(!is.na(cluster)) %>% 
   group_by(cluster) %>%
-  filter(rank(-authority_score) <= 50) %>% 
+  filter(rank(-authority_score) <= 30) %>% 
   ggplot(aes(label = name, size = log(degree), color = degree)) + 
   geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
   facet_wrap(~cluster) + 
-  labs(title = "Seguidores prominentes en cada cluster") + 
+  labs(title = "Usuarios prominentes en cada cluster") + 
   scale_color_gradient(low = "grey", high = "purple") 
 ```
 
