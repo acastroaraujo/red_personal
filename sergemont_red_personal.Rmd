@@ -1,0 +1,821 @@
+---
+title: "red personal"
+author: "andrés castro araújo"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    code_folding: show
+    theme: paper
+    toc: yes
+    toc_float:
+      collapsed: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+theme_custom <- function (base_family = "Avenir Next Condensed", fill = "white", ...) {
+    theme_minimal(base_family = base_family, ...) %+replace% 
+        theme(plot.title = element_text(face = "bold", margin = margin(0, 
+            0, 5, 0), hjust = 0, size = 13), plot.subtitle = element_text(face = "italic", 
+            margin = margin(0, 0, 5, 0), hjust = 0), plot.background = element_rect(fill = fill, 
+            size = 0), complete = TRUE, axis.title.x = element_text(margin = margin(15, 
+            0, 0, 0)), axis.title.y = element_text(angle = 90, 
+            margin = margin(0, 20, 0, 0)), strip.text = element_text(face = "italic", 
+            colour = "white"), strip.background = element_rect(fill = "#4C4C4C"))
+}
+
+```
+
+```{css, echo=FALSE}
+body {
+  font-family: Palatino, serif;
+  font-size: 16px;
+  background-color: #FFFCF9;
+}
+h1, h2, h3, h4 {
+  font-family: Palatino, serif;
+  font-weight: bold;
+}
+blockquote {
+  font-size: 13px;
+  color: #828282;
+}
+pre, code {
+  background-color: #ffffff;
+  border: 0px solid #ffffff;
+}
+.tocify, .list-group-item {
+  background-color: #FFFCF9;
+  font-family: Avenir Next Condensed;
+}
+.list-group-item.active, .list-group-item.active:hover, .list-group-item.active:focus {
+  background-color: steelblue;
+}
+.btn, .dropdown-menu {
+  background-color: #FFFCF9;
+  font-family: Avenir Next Condensed;
+}
+```
+
+Esta página contiene el código para generar análisis de redes personales (_ego networks_) en Twitter.
+
+## Set up
+
+```{r, message=FALSE}
+library(rtweet)
+source("createTokens.R")  ## keys y tokens privados
+source("rtweet_functions.R") ## funciones para trabajar con múltiples tokens
+
+library(tidyverse)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(ggwordcloud)
+library(tidytext)
+theme_set(theme_custom())
+```
+
+El primer paso consiste en escoger un usuario focal (o "ego") a partir del cual construímos una red personal.
+
+```{r}
+ego <- "sergemont" # 
+ego_info <- lookup_users(ego, token = sample(token, 1))
+
+ego_info$followers_count
+```
+
+Nombre: `r ego_info$name`
+
+Usuario: `r ego_info$screen_name`
+
+Seguidores: `r ego_info$followers_count`
+
+Amigos: `r ego_info$friends_count`
+
+Se unió a Twitter en `r ego_info$account_created_at`
+
+Este análisis está dividido en tres partes.
+
+1. La red de seguidores del usuario focal
+2. La red de "amigos" del ususario focal
+3. La red de amigos-seguidores del usuario focal
+
+Cada una de estas tres dimensiones corresponde a flujos de interacción diferentes. La primera consiste de los usuarios que reciben información de `r ego`, la segunda son los usuarios que generan la información recibida por `r ego`, y la tercera consiste en los usuarios donde el flujo de información es recíproco.
+
+Este código es de acceso libre excepto por los keys y tokens privados que se consiguen abriendo una cuenta de desarrollador en https://developer.twitter.com/
+
+## Red de seguidores
+
+El siguiente código extrae la lista de seguidores de `r ego_info$screen_name` (cada uno identificado con un `user_id`).
+
+```{r}
+ego_followers <- get_followers(ego, token = sample(token, 1), n = ego_info$followers_count)
+ego_followers
+```
+
+Este `user_id` es exclusivo a cada cuenta, incluso cuando el usuario decide cambiar su nombre.
+
+El siguiente código crea una carpeta llamada `*_friends_of_followers/` donde queda archivado la lista de los seguidores de cada uno de estos usuarios.
+
+Dependiendo del número de usuarios y el número de Tokens, esto puede llegar a demorarse varias horas (o incluso días).
+
+```{r}
+outfolder <- paste0(ego, "_friends_of_followers/")
+if (!dir.exists(outfolder)) dir.create(outfolder)
+```
+
+```{r, eval=FALSE}
+users_done <- str_replace(dir(outfolder), ".rds", "")
+users_left <- setdiff(ego_followers$user_id, users_done)
+
+while (length(users_left) > 0) { 
+  
+  new_user <- users_left[[1]]
+  
+  friends_of_user <- try(multi_get_friends(new_user, token))
+  
+  file_name <- str_glue("{outfolder}{new_user}.rds")
+  write_rds(friends_of_user, file_name, compress = "gz")
+  users_left <- users_left[-which(users_left %in% new_user)] ## int. subset
+  
+}
+
+```
+
+Para algunos usuarios esta información es imposible de conseguir porque son cuentas protegidas. 
+
+```{r, echo=FALSE}
+error_index <- dir(outfolder, full.names = TRUE) %>% 
+  map(read_rds) %>% 
+  map_lgl(~ any(class(.x) == "try-error")) %>% 
+  which()
+
+prop <- length(error_index) / nrow(ego_followers)
+```
+
+En este caso, no se puede obtener información sobre el `r scales::percent(prop, 0.1)` de los sequidores de `r ego`.
+
+### Edge list
+
+Para construir la red, tomamos toda la lista de usuarios y sus amigos y los organizamos en dos columnas, donde cada fila indica un usario (`from`) siguiendo a otro usario (`to`).
+
+```{r}
+edge_list <- list.files(outfolder, full.names = TRUE) %>% 
+  map(read_rds)
+  
+edge_list <- edge_list[-error_index] %>% 
+  bind_rows() 
+
+edge_list
+```
+
+Aquí hay `r scales::comma(nrow(edge_list))` conexiones. Sin embargo, aquí están incluídos conexiones on usuarios más allá de los que siguen a `r ego`.
+
+```{r, eval=FALSE}
+ego_followers_info <- lookup_users(ego_followers$user_id, token = sample(token), 1)
+write_rds(ego_followers_info, paste0(ego, "_follower_info.rds"), compress = "gz")
+```
+
+También podemos conseguir metadatos sobre cada usuario.
+
+```{r}
+ego_followers_info <- read_rds(paste0(ego, "_follower_info.rds")) %>% 
+  filter(!protected) %>% 
+  select(
+    user_id, screen_name, lang, name, location, description,
+    ends_with("count"), -starts_with("quote"), 
+    -starts_with("retweet"), -reply_count,
+    -starts_with("fav")
+    ) %>% 
+    rename(name = user_id, user_name = name)
+
+id_dict <- ego_followers_info %>% 
+  select(name, screen_name) %>% 
+  deframe()
+```
+
+Por ejemplo, esta es la información que corresponde a los seguidores de `r ego` con mayor número de seguidores.
+
+```{r}
+ego_followers_info %>% 
+  arrange(desc(followers_count)) %>% 
+  select(screen_name, description, location, followers_count, friends_count)
+```
+
+Finalmente nos interesa la red personal de seguidores de `r ego`, por lo cual eliminamos las conexiones entre usuarios que se encuentran por fuera de sus `r ego_info$followers_count`
+
+```{r}
+edge_list <- edge_list %>% 
+  filter(to %in% ego_followers_info$name) %>% 
+  filter(from %in% ego_followers_info$name)
+
+edge_list
+```
+
+La red personal de seguidores de `r ego` que pudimos reconstruir tiene `r nrow(ego_followers_info)` usuarios con `r nrow(edge_list)` conexiones.
+
+### Red Personal
+
+```{r, message=FALSE}
+ego_network <- edge_list %>% 
+  tidygraph::as_tbl_graph() %>% 
+  left_join(ego_followers_info) %>% 
+  rename(name = screen_name, user_id = name) %>% 
+  select(name, everything())
+
+ego_network
+
+## Estadísticas descriptivas
+
+ego_network <- ego_network %>% 
+  mutate(
+    out_degree = centrality_degree(mode = "out"),
+    in_degree = centrality_degree(mode = "in"),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  )
+
+ego_network 
+```
+
+La siguiente gráfica muestra la influencia de cada usuario en Twitter (eje horizontal) vs la influencia de cada usuario dentro de la red personal de seguidores (eje vertical)
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  #filter(in_degree > 5) %>% 
+  ggplot(aes(followers_count, in_degree)) + 
+  geom_point() 
+```
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  mutate(label_name = ifelse(
+    test = rank(-followers_count) <= 10 | rank(-in_degree) <= 10, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(followers_count, in_degree)) + 
+  geom_point() + 
+  ggrepel::geom_label_repel(aes(label = label_name), size = 3)
+```
+
+__Clusters__
+
+```{r}
+set.seed(123)
+clusters <- igraph::cluster_walktrap(graph = ego_network, steps = 7)
+
+cluster_df <- tibble(cluster = factor(clusters$membership), name = clusters$names) 
+  
+cluster_df <- cluster_df %>% 
+  group_by(cluster) %>% 
+  filter(n() >= 10) %>% 
+  ungroup()
+```
+
+```{r, fig.height=12, fig.width=12}
+ego_network <- ego_network %>% 
+  left_join(cluster_df)
+
+ego_network %>% 
+  as_tibble() %>% 
+  arrange(desc(in_degree)) %>% 
+  filter(!is.na(cluster)) %>% 
+  group_by(cluster) %>%
+  filter(rank(-authority_score) <= 30) %>% 
+  ggplot(aes(label = name, size = log(in_degree), color = in_degree)) + 
+  geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
+  facet_wrap(~cluster) + 
+  labs(title = "Seguidores prominentes en cada cluster") + 
+  scale_color_gradient(low = "grey", high = "purple") 
+```
+
+Tamaño de cada cluster:
+
+```{r}
+ego_network %>% as_tibble() %>% count(cluster)
+```
+
+¿Quiénes son los usuarios que funcionan como "puentes"?
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  arrange(desc(betweenness)) %>% 
+  select(name, description, location)
+```
+
+```{r}
+cols <- c("betweenness", "in_degree", "out_degree", "followers_count", "friends_count")
+
+ego_network %>% 
+  as_tibble() %>% 
+  group_by(cluster) %>% 
+  summarize(across(all_of(cols), mean)) %>% 
+  arrange(desc(betweenness))
+```
+
+### Subset
+
+Dada la información anterior podemos enfocarnos en segmentos particulares de la red personal.
+
+Por ejemplo, podemos enfocarnos exclusivamente en los usuarios que hacen parte de los grupos etiquetados con 12 y 4.
+
+```{r}
+ego_network_subset <- ego_network %>% 
+  filter(cluster %in% c(12, 4, 2, 6)) %>% 
+    mutate(
+    out_degree = centrality_degree(mode = "out"),
+    in_degree = centrality_degree(mode = "in"),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  ) 
+
+ego_network_subset %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = in_degree), 
+                  shape = 21, color = "white", show.legend = FALSE) 
+```
+
+```{r}
+ego_network_subset %>% 
+  as_tibble() %>% 
+  mutate(label_id = ifelse(
+    test = rank(-betweenness) <= 10 |rank(-in_degree) <= 10, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(betweenness, in_degree, color = cluster)) +
+  geom_point() +
+  ggrepel::geom_label_repel(aes(label = label_id), size = 3)
+
+```
+
+```{r}
+ego_network_subset %>% 
+  group_by(cluster) %>% 
+  mutate(label_name = ifelse(
+    test = rank(-authority_score) <= 5 | rank(-betweenness) <= 5,
+    yes = name,
+    no = NA_character_
+  )) %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = betweenness), 
+                  shape = 21, color = "white", show.legend = FALSE) +
+  geom_node_label(aes(label = label_name), 
+                  repel = TRUE, alpha = 3/4, size = 3) 
+```
+
+## Red de amigos
+
+Esta sección repite el análisis anterior para la red personal de amigos de `r ego`
+
+```{r}
+outfolder <- paste0(ego, "_friends_of_friends/")
+if (!dir.exists(outfolder)) dir.create(outfolder)
+
+ego_friends <- get_friends(ego, token = sample(token, 1))
+ego_friends
+```
+
+```{r, eval=FALSE}
+users_done <- str_replace(dir(outfolder), ".rds", "")
+users_left <- setdiff(ego_friends$user_id, users_done)
+
+while (length(users_left) > 0) { 
+  
+  new_user <- users_left[[1]]
+  
+  friends_of_user <- try(multi_get_friends(new_user, token))
+  
+  file_name <- str_glue("{outfolder}{new_user}.rds")
+  write_rds(friends_of_user, file_name, compress = "gz")
+  users_left <- users_left[-which(users_left %in% new_user)] ## int. subset
+  
+}
+
+```
+
+```{r, echo=FALSE}
+error_index <- dir(outfolder, full.names = TRUE) %>% 
+  map(read_rds) %>% 
+  map_lgl(~ any(class(.x) == "try-error")) %>% 
+  which()
+
+prop <- length(error_index) / nrow(ego_followers)
+```
+
+En este caso, no se puede obtener información sobre el `r scales::percent(prop, 0.1)` de los amigos de `r ego`.
+
+### Edge list
+
+```{r}
+edge_list <- list.files(outfolder, full.names = TRUE) %>% 
+  map(read_rds)
+  
+edge_list <- edge_list[-error_index] %>% bind_rows()
+
+edge_list
+```
+
+```{r, eval=FALSE}
+ego_friends_info <- lookup_users(ego_friends$user_id, token = token)
+write_rds(ego_friends_info, paste0(ego, "_friends_info.rds"), compress = "gz")
+```
+
+```{r}
+ego_friends_info <- read_rds(paste0(ego, "_friends_info.rds")) %>% 
+  filter(!protected) %>% 
+  select(
+    user_id, screen_name, lang, name, location, description,
+    ends_with("count"), -starts_with("quote"), 
+    -starts_with("retweet"), -reply_count,
+    -starts_with("fav")
+    ) %>% 
+    rename(name = user_id, user_name = name)
+
+id_dict <- ego_friends_info %>% 
+  select(name, screen_name) %>% 
+  deframe()
+```
+
+
+Esta es la información que corresponde a los amigos de `r ego` con mayor número de seguidores.
+
+```{r}
+ego_friends_info %>% 
+  arrange(desc(followers_count)) %>% 
+  select(screen_name, description, location, followers_count, friends_count)
+```
+
+```{r}
+edge_list <- edge_list %>% 
+  filter(to %in% ego_friends_info$name) %>% 
+  filter(from %in% ego_friends_info$name)
+
+edge_list
+```
+
+La red personal de seguidores de `r ego` que pudimos reconstruir tiene `r nrow(ego_friends_info)` usuarios con `r nrow(edge_list)` conexiones.
+
+### Red Personal
+
+```{r, message=FALSE}
+ego_network <- edge_list %>% 
+  tidygraph::as_tbl_graph() %>% 
+  left_join(ego_friends_info) %>% 
+  rename(name = screen_name, user_id = name) %>% 
+  select(name, everything())
+
+## Estadísticas descriptivas
+
+ego_network <- ego_network %>% 
+  mutate(
+    out_degree = centrality_degree(mode = "out"),
+    in_degree = centrality_degree(mode = "in"),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  )
+
+ego_network
+```
+
+La siguiente gráfica muestra la influencia de cada usuario en Twitter (eje horizontal) vs la influencia de cada usuario dentro de la red personal de amigos (eje vertical)
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  #filter(in_degree > 5) %>% 
+  ggplot(aes(followers_count, in_degree)) + 
+  geom_point() 
+```
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  mutate(label_name = ifelse(
+    test = rank(-followers_count) <= 10 | rank(-in_degree) <= 10, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(followers_count, in_degree)) + 
+  geom_point() + 
+  ggrepel::geom_label_repel(aes(label = label_name), size = 3)
+```
+
+__Clusters__
+
+```{r}
+clusters <- igraph::cluster_walktrap(graph = ego_network, steps = 12)
+
+cluster_df <- tibble(cluster = factor(clusters$membership), name = clusters$names) 
+  
+cluster_df <- cluster_df %>% 
+  group_by(cluster) %>% 
+  filter(n() >= 10) %>% 
+  ungroup()
+```
+
+```{r, fig.height=8}
+ego_network <- ego_network %>% 
+  left_join(cluster_df)
+
+ego_network %>% 
+  as_tibble() %>% 
+  arrange(desc(in_degree)) %>% 
+  filter(!is.na(cluster)) %>% 
+  group_by(cluster) %>%
+  filter(rank(-authority_score) <= 30) %>% 
+  ggplot(aes(label = name, size = log(in_degree), color = in_degree)) + 
+  geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
+  facet_wrap(~cluster) + 
+  labs(title = "Amigos prominentes en cada cluster") + 
+  scale_color_gradient(low = "grey", high = "purple") 
+```
+
+Tamaño de cada cluster:
+
+```{r}
+ego_network %>% as_tibble() %>% count(cluster)
+```
+
+¿Quiénes son los usuarios que funcionan como "puentes"?
+
+```{r}
+ego_network %>% 
+  as_tibble() %>% 
+  arrange(desc(betweenness)) %>% 
+  select(name, description, location)
+```
+
+```{r}
+cols <- c("betweenness", "in_degree", "out_degree", "followers_count", "friends_count")
+
+ego_network %>% 
+  as_tibble() %>% 
+  group_by(cluster) %>% 
+  summarize(across(all_of(cols), mean)) %>% 
+  arrange(desc(betweenness))
+```
+
+### Subset
+
+```{r}
+ego_network_subset <- ego_network %>% 
+  filter(!is.na(cluster)) %>% 
+    mutate(
+    out_degree = centrality_degree(mode = "out"),
+    in_degree = centrality_degree(mode = "in"),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  ) 
+
+ego_network_subset %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = in_degree), 
+                  shape = 21, color = "white", show.legend = FALSE) 
+```
+
+```{r}
+ego_network_subset %>% 
+  as_tibble() %>% 
+  mutate(label_id = ifelse(
+    test = rank(-betweenness) <= 10 |rank(-in_degree) <= 10, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(betweenness, in_degree, color = cluster)) +
+  geom_point() +
+  ggrepel::geom_label_repel(aes(label = label_id), size = 3)
+
+```
+
+```{r}
+ego_network_subset %>% 
+  group_by(cluster) %>% 
+  mutate(label_name = ifelse(
+    test = rank(-authority_score) <= 5 | rank(-betweenness) <= 5,
+    yes = name,
+    no = NA_character_
+  )) %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = betweenness), 
+                  shape = 21, color = "white", show.legend = FALSE) +
+  geom_node_label(aes(label = label_name), 
+                  repel = TRUE, alpha = 3/4, size = 3) 
+```
+
+## Red de mutuals
+
+### Red Personal
+
+```{r}
+edge_list <- list.files(paste0(ego, "_friends_of_friends/"), full.names = TRUE) %>% 
+  map(read_rds)
+
+error_index <- edge_list %>% 
+  map_lgl(~ any(class(.x) == "try-error")) %>% 
+  which()
+
+edge_list <- edge_list[-error_index] %>% bind_rows()
+
+edge_list_mutual <- inner_join(
+  edge_list, 
+  edge_list %>% rename(from = to, to = from)
+  ) %>% 
+  filter(from %in% ego_followers$user_id, to %in% ego_followers$user_id) %>%
+  filter(from %in% ego_friends$user_id, to %in% ego_friends$user_id) %>%
+  filter(from %in% to, to %in% from)
+
+mat <- edge_list_mutual %>% 
+  mutate(n = 1) %>% 
+  tidytext::cast_sparse(from, to, n) %>% 
+  as.matrix()
+
+mat <- mat[colnames(mat), ]
+
+mutual_network <- mat %>% 
+  graph_from_adjacency_matrix(mode = "undirected") %>% 
+  tidygraph::as_tbl_graph() 
+
+mutual_network
+
+```
+
+```{r}
+ego_mutuals_info <- lookup_users(as_tibble(mutual_network)$name, token = sample(token), 1)
+
+ego_mutuals_info <- ego_mutuals_info %>% 
+  filter(!protected) %>% 
+  select(
+    user_id, screen_name, lang, name, location, description,
+    ends_with("count"), -starts_with("quote"), 
+    -starts_with("retweet"), -reply_count,
+    -starts_with("fav")
+    ) %>% 
+    rename(name = user_id, user_name = name)
+
+mutual_network <- mutual_network %>% 
+  inner_join(ego_mutuals_info) %>% 
+  rename(name = screen_name, user_id = name) %>% 
+  select(name, everything())
+
+## Estadísticas descriptivas
+
+mutual_network <- mutual_network %>% 
+  mutate(
+    degree = centrality_degree(),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  )
+```
+
+La siguiente gráfica muestra la influencia de cada usuario en Twitter (eje horizontal) vs la influencia de cada usuario dentro de la red personal de amigos (eje vertical)
+
+```{r}
+mutual_network %>% 
+  as_tibble() %>% 
+  ggplot(aes(followers_count, degree)) + 
+  geom_point() 
+```
+
+```{r}
+mutual_network %>% 
+  as_tibble() %>% 
+  mutate(label_name = ifelse(
+    test = rank(-followers_count) <= 15 | rank(-degree) <= 15, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(followers_count, degree)) + 
+  geom_point() + 
+  ggrepel::geom_label_repel(aes(label = label_name), size = 3)
+```
+
+__Clusters__
+
+```{r}
+clusters <- igraph::cluster_louvain(graph = mutual_network)
+
+cluster_df <- tibble(cluster = factor(clusters$membership), name = clusters$names) 
+  
+cluster_df <- cluster_df %>% 
+  group_by(cluster) %>% 
+  filter(n() >= 10) %>% 
+  ungroup()
+```
+
+```{r, fig.height=10}
+mutual_network <- mutual_network %>% 
+  left_join(cluster_df)
+
+mutual_network %>% 
+  as_tibble() %>% 
+  arrange(desc(degree)) %>%
+  filter(!is.na(cluster)) %>% 
+  group_by(cluster) %>%
+  filter(rank(-authority_score) <= 30) %>% 
+  ggplot(aes(label = name, size = log(degree), color = degree)) + 
+  geom_text_wordcloud_area(family = "Avenir Next Condensed") + 
+  facet_wrap(~cluster) + 
+  labs(title = "Usuarios prominentes en cada cluster") + 
+  scale_color_gradient(low = "grey", high = "purple") 
+```
+
+Tamaño de cada cluster:
+
+```{r}
+mutual_network %>% as_tibble() %>% count(cluster)
+```
+
+¿Quiénes son los usuarios que funcionan como "puentes"?
+
+```{r}
+mutual_network %>% 
+  as_tibble() %>% 
+  arrange(desc(betweenness)) 
+```
+
+```{r}
+cols <- c("betweenness", "degree", "followers_count", "friends_count")
+
+mutual_network %>% 
+  as_tibble() %>% 
+  group_by(cluster) %>% 
+  summarize(across(all_of(cols), mean)) %>% 
+  arrange(desc(betweenness))
+```
+
+### Subset
+
+```{r}
+mutual_network_subset <- mutual_network %>% 
+  filter(!is.na(cluster)) %>% 
+    mutate(
+    degree = centrality_degree(),
+    betweenness = centrality_betweenness(directed = TRUE),
+    authority_score = centrality_authority(),
+    eigen_centrality = centrality_eigen(directed = TRUE)
+  ) 
+
+mutual_network_subset %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = degree), 
+                  shape = 21, color = "white", show.legend = FALSE) 
+```
+
+```{r}
+mutual_network_subset %>% 
+  as_tibble() %>% 
+  mutate(label_id = ifelse(
+    test = rank(-betweenness) <= 10 |rank(-degree) <= 10, 
+    yes = name, 
+    no = NA_character_)
+    ) %>% 
+  ggplot(aes(betweenness, degree, color = cluster)) +
+  geom_point() +
+  ggrepel::geom_label_repel(aes(label = label_id), size = 3)
+
+```
+
+```{r, fig.height=5}
+mutual_network_subset %>% 
+  group_by(cluster) %>% 
+  mutate(label_name = ifelse(
+    test = rank(-degree) <= 5 | rank(-betweenness) <= 5,
+    yes = name,
+    no = NA_character_
+  )) %>% 
+  ggraph("mds") +
+  geom_edge_fan(alpha = 1/5, width = 1/5) + 
+  geom_node_point(aes(fill = cluster, size = betweenness), 
+                  shape = 21, color = "white", show.legend = FALSE) +
+  geom_node_label(aes(label = label_name), 
+                  repel = TRUE, alpha = 3/4, size = 3) 
+```
+
+
+## Funciones adicionales
+
+```{r}
+readLines("rtweet_functions.R") %>% 
+  writeLines()
+```
+
+```{r}
+theme_custom
+```
+
